@@ -1,0 +1,28 @@
+paths:
+  base_dir: "."
+  outputs_dir: "outputs"
+  memory_dir: "memory"
+  logs_dir: "logs"
+  nlp_output_file: "nlp_output.json"
+  cv_output_file: "cv_output.json"
+  short_term_file: "short_term.json"
+  long_term_file: "long_term.json"
+  log_file: "sakhi.log"
+
+grok:
+  api_key: "YOUR_GROK_API_KEY_HERE"
+  api_url: "https://api.x.ai/v1/chat/completions"
+  model: "grok-beta"
+  max_tokens: 300
+  temperature: 0.75
+  timeout_seconds: 10
+
+tuning:
+  nlp_poll_interval: 0.1
+  cv_poll_interval: 5.0
+  mem_sync_interval: 5.0
+  watchdog_interval: 1.0
+  idle_timeout: 30.0
+  max_conv_turns: 20
+  silence_threshold: 3.0
+  min_llm_call_gap: 3.0
