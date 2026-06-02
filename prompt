@@ -1,0 +1,11 @@
+see the entire repo, and complete the missing parts, like fill the yaml config file, 
+
+complete the NLP thread of listening to user, make another thread of replying to the user also and add the output reply code for it.
+
+for cv folder i added new code, call them from the main.py the cv thread
+
+for the memory folder also I added new code, call them also from the main thread
+
+complete and fill the gaps for the entire pipeline to work
+
+later write a test file to test each adn every part seperately or combined

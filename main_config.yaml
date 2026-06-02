@@ -9,6 +9,15 @@ paths:
   long_term_file: "long_term.json"
   log_file: "sakhi.log"
 
+nlp:
+  stt_model: "whisper-1"
+  stt_timeout_seconds: 15
+  stt_api_key: "YOUR_STT_API_KEY_HERE"
+
+  tss_model: "whisper-1"
+  tss_timeout_seconds: 15
+  tss_api_key: "YOUR_TSS_API_KEY_HERE"
+  
 grok:
   api_key: "YOUR_GROK_API_KEY_HERE"
   api_url: "https://api.x.ai/v1/chat/completions"

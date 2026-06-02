@@ -20,36 +20,6 @@ File layout expected:
   /sakhi/memory/long_term.json     ← persistent memory (this file manages)
   /sakhi/logs/sakhi.log            ← all logs go here
 
-NLP JSON schema expected:
-  {
-    "timestamp": 1234567890.0,
-    "transcript": "Can I get the menu please?",
-    "language": "en",
-    "intent": "request_menu",
-    "entities": [...],
-    "urgency": "medium",
-    "sentiment": "neutral",
-    "is_new": true           ← main loop flips this to false after reading
-  }
-
-CV JSON schema expected:
-  {
-    "timestamp": 1234567890.0,
-    "users_detected": [
-      {
-        "track_id": 1,
-        "position": "sitting_front",
-        "emotion": "happy",
-        "gaze": "towards_robot",
-        "pose": "relaxed",
-        "distance_cm": 80
-      }
-    ],
-    "scene": "restaurant_table",
-    "ambient": "normal_lighting",
-    "num_people": 2,
-    "is_new": true
-  }
 """
 
 import os
