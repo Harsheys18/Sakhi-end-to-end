@@ -28,8 +28,10 @@ import json
 import time
 import logging
 import threading
+import queue
 import copy
 import signal
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -58,6 +60,10 @@ if not CONFIG_PATH.exists():
 
 CONFIG = yaml.safe_load(CONFIG_PATH.open())
 
+NLP_CFG = CONFIG.get("nlp", {})
+CV_CFG  = CONFIG.get("cv", {})
+MEM_CFG = CONFIG.get("memory", {})
+
 # ─────────────────────────────────────────────
 #  PATHS  — loaded from main_config.yaml
 # ─────────────────────────────────────────────
@@ -67,6 +73,7 @@ MEMORY_DIR      = BASE_DIR / CONFIG["paths"]["memory_dir"]
 LOGS_DIR        = BASE_DIR / CONFIG["paths"]["logs_dir"]
 NLP_OUTPUT_FILE = OUTPUTS_DIR / CONFIG["paths"]["nlp_output_file"]
 CV_OUTPUT_FILE  = OUTPUTS_DIR / CONFIG["paths"]["cv_output_file"]
+REPLY_OUTPUT_FILE = OUTPUTS_DIR / CONFIG["paths"].get("reply_output_file", "reply_output.json")
 SHORT_TERM_FILE = MEMORY_DIR / CONFIG["paths"]["short_term_file"]
 LONG_TERM_FILE  = MEMORY_DIR / CONFIG["paths"]["long_term_file"]
 LOG_FILE        = LOGS_DIR / CONFIG["paths"]["log_file"]
@@ -74,7 +81,7 @@ LOG_FILE        = LOGS_DIR / CONFIG["paths"]["log_file"]
 # ─────────────────────────────────────────────
 #  GROK API CONFIG
 # ─────────────────────────────────────────────
-GROK_API_KEY     = CONFIG["grok"]["api_key"]
+GROK_API_KEY     = CONFIG["grok"].get("api_key") or os.environ.get("GROK_API_KEY", "")
 GROK_API_URL     = CONFIG["grok"]["api_url"]
 GROK_MODEL       = CONFIG["grok"]["model"]
 LLM_MAX_TOKENS   = int(CONFIG["grok"]["max_tokens"])
@@ -92,6 +99,11 @@ IDLE_TIMEOUT      = float(CONFIG["tuning"]["idle_timeout"])
 MAX_CONV_TURNS    = int(CONFIG["tuning"]["max_conv_turns"])
 SILENCE_THRESHOLD = float(CONFIG["tuning"]["silence_threshold"])
 MIN_LLM_CALL_GAP  = float(CONFIG["tuning"]["min_llm_call_gap"])
+
+ENABLE_NLP_INPUT  = bool(NLP_CFG.get("enable_input", True))
+ENABLE_NLP_OUTPUT = bool(NLP_CFG.get("enable_output", True))
+ENABLE_CV_PIPELINE = bool(CV_CFG.get("enable_cv", True))
+ENABLE_DB         = bool(MEM_CFG.get("use_db", False))
 
 
 # ══════════════════════════════════════════════
@@ -149,7 +161,12 @@ shared_state = {
     "running":              True,
     "emergency_stop":       False,
     "battery_level":        100,
+    "session_id":           "",
+    "turn_seq":             0,
 }
+
+reply_queue: "queue.Queue[tuple[str, dict | None]]" = queue.Queue()
+DB_CONN = None
 
 
 # ══════════════════════════════════════════════
@@ -176,6 +193,133 @@ def save_json_safe(path: Path, data):
         tmp.replace(path)
     except OSError as e:
         log.error(f"Could not save {path}: {e}")
+
+
+def write_reply_output(text: str, meta: dict | None = None) -> None:
+    """Write the latest assistant reply to outputs/reply_output.json."""
+    payload = {
+        "timestamp": time.time(),
+        "text": text,
+        "is_new": True,
+    }
+    if meta:
+        payload["meta"] = meta
+    save_json_safe(REPLY_OUTPUT_FILE, payload)
+
+
+def init_db_connection() -> None:
+    """Initialize optional PostgreSQL memory store if enabled."""
+    global DB_CONN
+    if not ENABLE_DB:
+        return
+    try:
+        from memory import db as sakhi_db
+    except ImportError as exc:
+        log.warning(f"DB disabled: memory/db.py import failed: {exc}")
+        return
+    try:
+        DB_CONN = sakhi_db.connect()
+        sakhi_db.init_db(DB_CONN)
+        log.info("PostgreSQL memory store connected.")
+    except Exception as exc:
+        DB_CONN = None
+        log.warning(f"DB disabled: failed to connect/init: {exc}")
+
+
+def db_log_interaction(entry: dict) -> None:
+    """Persist a single interaction log entry if DB is enabled."""
+    if not DB_CONN:
+        return
+    try:
+        from memory import db as sakhi_db
+        sakhi_db.put_in(DB_CONN, "session_memory", "interaction_log", entry, shared_state["session_id"])
+    except Exception as exc:
+        log.warning(f"DB log failed: {exc}")
+
+
+def enqueue_reply(text: str, meta: dict | None = None) -> None:
+    reply_queue.put((text, meta))
+
+
+def reply_worker_thread() -> None:
+    log.info("Reply worker started.")
+    while shared_state["running"] or not reply_queue.empty():
+        try:
+            text, meta = reply_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        try:
+            if ENABLE_NLP_OUTPUT:
+                speak(text)
+            else:
+                print(f"[SAKHI SPEAKS]: {text}")
+        finally:
+            write_reply_output(text, meta)
+            with state_lock:
+                shared_state["bot_is_speaking"] = False
+                shared_state["last_speech_time"] = time.time()
+            reply_queue.task_done()
+
+    log.info("Reply worker stopped.")
+
+
+def nlp_input_thread() -> None:
+    """Runs the NLP microphone listener in a dedicated thread."""
+    if not ENABLE_NLP_INPUT:
+        log.info("NLP input disabled in config.")
+        return
+    try:
+        from nlp.input import run_input_pipeline
+    except ImportError as exc:
+        log.warning(f"NLP input thread not started: {exc}")
+        return
+    run_input_pipeline()
+
+
+def cv_pipeline_thread() -> None:
+    """Runs the CV pipeline to emit outputs/cv_output.json."""
+    if not ENABLE_CV_PIPELINE:
+        log.info("CV pipeline disabled in config.")
+        return
+
+    cv_root = Path(__file__).parent / "cv"
+    if str(cv_root) not in sys.path:
+        sys.path.insert(0, str(cv_root))
+
+    os.environ["SAKHI_CV_OUTPUT_PATH"] = str(CV_OUTPUT_FILE)
+
+    try:
+        import importlib.util
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("sakhi_cv_main", cv_root / "main.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Could not load cv main module spec")
+        cv_main = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cv_main)
+    except Exception as exc:
+        log.warning(f"CV pipeline import failed: {exc}")
+        return
+
+    args = SimpleNamespace(
+        camera=CV_CFG.get("camera_index", 0),
+        width=CV_CFG.get("width", 640),
+        height=CV_CFG.get("height", 480),
+        alpha=CV_CFG.get("alpha", 0.4),
+        fps=CV_CFG.get("fps", 30.0),
+        num_faces=CV_CFG.get("num_faces", 1),
+        obj_rate=CV_CFG.get("obj_rate", 2.0),
+        force_rate=CV_CFG.get("force_rate", 0.0),
+        output=CV_CFG.get("output", "json"),
+        baseline_file=CV_CFG.get("baseline_file"),
+        include_baseline=CV_CFG.get("include_baseline", False),
+        session_id=shared_state.get("session_id", ""),
+        no_display=CV_CFG.get("no_display", True),
+        fps_overlay=CV_CFG.get("fps_overlay", False),
+        profile=CV_CFG.get("profile", False),
+    )
+
+    cv_main.run(args)
 
 
 def load_memory():
@@ -209,6 +353,12 @@ def append_turn_to_memory(short_mem: dict, role: str, content: str, meta: dict =
     # trim if too long — keep last MAX_CONV_TURNS turns
     if len(short_mem["turns"]) > MAX_CONV_TURNS:
         short_mem["turns"] = short_mem["turns"][-MAX_CONV_TURNS:]
+
+
+def next_turn_seq() -> int:
+    with state_lock:
+        shared_state["turn_seq"] += 1
+        return shared_state["turn_seq"]
 
 
 # ══════════════════════════════════════════════
@@ -687,10 +837,12 @@ def main_brain_loop(short_mem: dict, long_mem: dict):
             })
 
     log.info("SAKHI is awake and listening.")
-    speak("Hello! I am Sakhi, your table companion. How can I make your evening wonderful?")
-
     with state_lock:
-        shared_state["last_speech_time"] = time.time()
+        shared_state["bot_is_speaking"] = True
+    enqueue_reply("Hello! I am Sakhi, your table companion. How can I make your evening wonderful?", {
+        "reason": "boot_greeting",
+        "language": "en",
+    })
 
     while shared_state["running"]:
         time.sleep(0.05)   # ~20Hz main loop tick
@@ -735,9 +887,12 @@ def main_brain_loop(short_mem: dict, long_mem: dict):
             log.warning("LLM call failed — using fallback response.")
             reply = "Sorry, I didn't quite catch that. Could you say it again?"
 
-        # ── 4. Speak the response ───────────────────────────────────────
+        # ── 4. Speak the response (async via reply worker) ──────────────
         log.info(f"SAKHI responds: {reply}")
-        speak(reply)
+        enqueue_reply(reply, {
+            "reason": reason,
+            "language": nlp_snap.get("language", "en"),
+        })
 
         # ── 5. Update shared conversation history ──────────────────────
         with state_lock:
@@ -748,21 +903,38 @@ def main_brain_loop(short_mem: dict, long_mem: dict):
             shared_state["conversation_history"].append(
                 {"role": "assistant", "content": reply}
             )
-            shared_state["bot_is_speaking"] = False
-            shared_state["last_speech_time"] = time.time()
+            # reply_worker_thread flips bot_is_speaking when TTS completes
 
         # ── 6. Persist turn to short-term memory ────────────────────────
         if reason != "idle_greeting":
-            append_turn_to_memory(
-                short_mem, "user", nlp_snap["transcript"],
-                meta={
-                    "intent":   nlp_snap["intent"],
-                    "urgency":  nlp_snap["urgency"],
-                    "emotion":  nlp_snap["sentiment"],
-                    "cv_users": cv_snap.get("users_detected", []),
-                }
-            )
+            user_meta = {
+                "intent":   nlp_snap["intent"],
+                "urgency":  nlp_snap["urgency"],
+                "emotion":  nlp_snap["sentiment"],
+                "cv_users": cv_snap.get("users_detected", []),
+            }
+            append_turn_to_memory(short_mem, "user", nlp_snap["transcript"], meta=user_meta)
+            db_log_interaction({
+                "seq": next_turn_seq(),
+                "type": "human_utterance",
+                "intent": nlp_snap["intent"],
+                "speaker_id": "guest",
+                "data": {
+                    "text": nlp_snap["transcript"],
+                    "meta": user_meta,
+                },
+            })
+
         append_turn_to_memory(short_mem, "assistant", reply)
+        db_log_interaction({
+            "seq": next_turn_seq(),
+            "type": "robot_utterance",
+            "response": "spoken",
+            "data": {
+                "text": reply,
+                "reason": reason,
+            },
+        })
 
     log.info("Main brain loop exited.")
 
@@ -791,7 +963,7 @@ def boot():
     log.info("══════════════════════════════════════")
 
     # Ensure output directories exist
-    for path in [NLP_OUTPUT_FILE, CV_OUTPUT_FILE, SHORT_TERM_FILE, LONG_TERM_FILE]:
+    for path in [NLP_OUTPUT_FILE, CV_OUTPUT_FILE, REPLY_OUTPUT_FILE, SHORT_TERM_FILE, LONG_TERM_FILE]:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     # Graceful shutdown on SIGINT / SIGTERM (ROS2 sends SIGTERM)
@@ -802,6 +974,23 @@ def boot():
     short_mem, long_mem = load_memory()
     log.info(f"Memory loaded: {len(short_mem.get('turns', []))} prior turns, "
              f"{long_mem.get('visit_count', 0)} past visits.")
+
+    # ── Session + DB init ───────────────────────────────────────────────
+    with state_lock:
+        shared_state["session_id"] = f"ses_{uuid.uuid4().hex[:12]}"
+        shared_state["turn_seq"] = 0
+
+    init_db_connection()
+    if DB_CONN:
+        try:
+            from memory import db as sakhi_db
+            sakhi_db.put_in(DB_CONN, "session_memory", "session_meta", {
+                "schema": "session_memory_v1",
+                "session_id": shared_state["session_id"],
+                "started_at_ms": int(time.time() * 1000),
+            }, shared_state["session_id"])
+        except Exception as exc:
+            log.warning(f"DB session_meta write failed: {exc}")
 
     # ── Spawn threads ──────────────────────────────────────────────────
     threads = [
@@ -826,7 +1015,26 @@ def boot():
             name="Safety-Watchdog",
             daemon=True,
         ),
+        threading.Thread(
+            target=reply_worker_thread,
+            name="Reply-Worker",
+            daemon=True,
+        ),
     ]
+
+    if ENABLE_NLP_INPUT:
+        threads.append(threading.Thread(
+            target=nlp_input_thread,
+            name="NLP-Input",
+            daemon=True,
+        ))
+
+    if ENABLE_CV_PIPELINE:
+        threads.append(threading.Thread(
+            target=cv_pipeline_thread,
+            name="CV-Pipeline",
+            daemon=True,
+        ))
 
     for t in threads:
         t.start()

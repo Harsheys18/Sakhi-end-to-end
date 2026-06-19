@@ -19,6 +19,8 @@ import json
 import sys
 import os
 
+CV_OUTPUT_PATH = os.environ.get("SAKHI_CV_OUTPUT_PATH", "")
+
 from camera.capture              import CameraCapture
 from mediapipe_models.loader     import (
     build_detector, landmarks_to_numpy, make_mp_image,
@@ -63,6 +65,10 @@ from state.baseline_tracker      import PersonalBaselineTracker
 from outputs.vision_output       import format_vision_v1, new_session_id
 from outputs.event_trigger       import EmissionController
 from outputs.llm_context         import format_llm_context
+try:
+    from outputs.cv_bridge import write_cv_output
+except Exception:
+    write_cv_output = None
 
 from utils.timing                import FPSCounter, RateGate, PipelineTimer
 
@@ -70,13 +76,17 @@ import cv2 as cv
 import numpy as np
 
 
-def req_vision():
+def req_vision(output_path: str | None = None):
     global LATEST_VISION_JSON
 
     if LATEST_VISION_JSON is None:
         return False
 
-    with open("cv_output.json", "w", encoding="utf-8") as f:
+    target = output_path or CV_OUTPUT_PATH or "cv_output.json"
+    if write_cv_output:
+        return write_cv_output(LATEST_VISION_JSON, target)
+
+    with open(target, "w", encoding="utf-8") as f:
         f.write(LATEST_VISION_JSON)
 
     return True
@@ -347,6 +357,8 @@ def run(args):
                     "gaze_aversion":        av_t,
                     "body":                 body_f,
                     "hands":                hand_f,
+                    "face_distance_cm":      face_f.get("face_distance_cm"),
+                    "face_center":           face_f.get("face_center"),
                     "eye_contact_rate":     gaze_t.get("eye_contact_rate", 0.0),
                     "blink_rate":           eye_t.get("blink_rate", 0.0),
                     "fidget_probability":   body_t.get("fidget_probability", 0.0),
@@ -376,7 +388,13 @@ def run(args):
                     "overwhelm_probability": 0.0, "comfort_seeking": 0.0,
                     "emotional_withdrawal": 0.0, "openness_to_support": 0.0,
                 }
-                full_state = {**base, **sup_out, "baseline_active": False}
+                full_state = {
+                    **base,
+                    **sup_out,
+                    "baseline_active": False,
+                    "face_distance_cm": None,
+                    "face_center": None,
+                }
             timer.end("features")
 
             should_emit = False
@@ -413,6 +431,11 @@ def run(args):
                 global LATEST_VISION_JSON
                 LATEST_VISION_JSON = output
                 emission_ctrl.mark_emitted(full_state)
+                if CV_OUTPUT_PATH and write_cv_output and args.output == "json":
+                    try:
+                        write_cv_output(LATEST_VISION_JSON, CV_OUTPUT_PATH)
+                    except Exception:
+                        pass
 
             if not args.no_display:
                 timer.start("viz")

@@ -1,0 +1,10 @@
+numpy
+PyYAML
+requests
+sounddevice
+soundfile
+torch
+mediapipe
+opencv-python
+psycopg2-binary
+pytest

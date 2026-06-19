@@ -5,18 +5,44 @@ paths:
   logs_dir: "logs"
   nlp_output_file: "nlp_output.json"
   cv_output_file: "cv_output.json"
+  reply_output_file: "reply_output.json"
   short_term_file: "short_term.json"
   long_term_file: "long_term.json"
   log_file: "sakhi.log"
 
 nlp:
-  stt_model: "whisper-1"
-  stt_timeout_seconds: 15
-  stt_api_key: "YOUR_STT_API_KEY_HERE"
+  enable_input: true
+  enable_output: true
+  sample_rate: 16000
+  vad_frame_ms: 30
+  vad_threshold: 0.5
+  vad_silence_ms: 800
+  max_utterance_sec: 15.0
+  deepgram_api_key: "YOUR_DEEPGRAM_API_KEY_HERE"
+  deepgram_model: "nova-2"
+  deepgram_language: "hi"
+  mic_device_index: null
+  tts_voice_english: "aura-asteria-en"
+  tts_voice_hindi: "aura-asteria-en"
+  tts_sample_rate: 24000
+  speaker_device_index: null
 
-  tss_model: "whisper-1"
-  tss_timeout_seconds: 15
-  tss_api_key: "YOUR_TSS_API_KEY_HERE"
+cv:
+  enable_cv: true
+  camera_index: 0
+  width: 640
+  height: 480
+  alpha: 0.4
+  fps: 30.0
+  num_faces: 1
+  obj_rate: 2.0
+  force_rate: 0.0
+  output: "json"
+  baseline_file: null
+  include_baseline: false
+  no_display: true
+  fps_overlay: false
+  profile: false
   
 grok:
   api_key: "YOUR_GROK_API_KEY_HERE"
@@ -25,6 +51,9 @@ grok:
   max_tokens: 300
   temperature: 0.75
   timeout_seconds: 10
+
+memory:
+  use_db: false
 
 tuning:
   nlp_poll_interval: 0.1
